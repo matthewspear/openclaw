@@ -1,9 +1,7 @@
 import type { SsrFPolicy } from "../infra/net/ssrf.js";
 import { normalizeEmbeddingModelWithPrefixes } from "./embeddings-model-normalize.js";
-import {
-  createRemoteEmbeddingProvider,
-  resolveRemoteEmbeddingClient,
-} from "./embeddings-remote-provider.js";
+import { resolveRemoteEmbeddingBearerClient } from "./embeddings-remote-client.js";
+import { fetchRemoteEmbeddingVectors } from "./embeddings-remote-fetch.js";
 import type { EmbeddingProvider, EmbeddingProviderOptions } from "./embeddings.js";
 
 export type OpenAiEmbeddingClient = {
@@ -11,6 +9,7 @@ export type OpenAiEmbeddingClient = {
   headers: Record<string, string>;
   ssrfPolicy?: SsrFPolicy;
   model: string;
+  dimensions?: number;
 };
 
 export const DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
@@ -33,14 +32,35 @@ export async function createOpenAiEmbeddingProvider(
   options: EmbeddingProviderOptions,
 ): Promise<{ provider: EmbeddingProvider; client: OpenAiEmbeddingClient }> {
   const client = await resolveOpenAiEmbeddingClient(options);
+  const url = `${client.baseUrl.replace(/\/$/, "")}/embeddings`;
+
+  const embed = async (input: string[]): Promise<number[][]> => {
+    if (input.length === 0) {
+      return [];
+    }
+    return await fetchRemoteEmbeddingVectors({
+      url,
+      headers: client.headers,
+      body: {
+        model: client.model,
+        input,
+        ...(client.dimensions && { dimensions: client.dimensions }),
+      },
+      errorPrefix: "openai embeddings failed",
+    });
+  };
 
   return {
-    provider: createRemoteEmbeddingProvider({
+    provider: {
       id: "openai",
-      client,
-      errorPrefix: "openai embeddings failed",
+      model: client.model,
       maxInputTokens: OPENAI_MAX_INPUT_TOKENS[client.model],
-    }),
+      embedQuery: async (text) => {
+        const [vec] = await embed([text]);
+        return vec ?? [];
+      },
+      embedBatch: embed,
+    },
     client,
   };
 }
@@ -48,10 +68,11 @@ export async function createOpenAiEmbeddingProvider(
 export async function resolveOpenAiEmbeddingClient(
   options: EmbeddingProviderOptions,
 ): Promise<OpenAiEmbeddingClient> {
-  return await resolveRemoteEmbeddingClient({
+  const { baseUrl, headers } = await resolveRemoteEmbeddingBearerClient({
     provider: "openai",
     options,
     defaultBaseUrl: DEFAULT_OPENAI_BASE_URL,
-    normalizeModel: normalizeOpenAiModel,
   });
+  const model = normalizeOpenAiModel(options.model);
+  return { baseUrl, headers, model, dimensions: options.dimensions };
 }
